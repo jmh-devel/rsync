@@ -25,6 +25,7 @@
 #include "ifuncs.h"
 #include "io.h"
 #include "threadpool.h"
+#include "network_monitor.h"
 #if defined CONFIG_LOCALE && defined HAVE_LOCALE_H
 #include <locale.h>
 #endif
@@ -1835,6 +1836,13 @@ int main(int argc,char *argv[])
 	}
 
 	if (num_threads > 0) {
+		thread_pool = threadpool_create(num_threads, 256);
+		if (thread_pool == NULL) {
+			rprintf(FERROR, "Failed to create thread pool\n");
+			exit_cleanup(RERR_MALLOC);
+		}
+	} else if (num_threads == 0 && (poptGetNextOpt(pc) == 'j')) {
+		num_threads = get_optimal_threads();
 		thread_pool = threadpool_create(num_threads, 256);
 		if (thread_pool == NULL) {
 			rprintf(FERROR, "Failed to create thread pool\n");

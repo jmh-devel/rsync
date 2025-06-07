@@ -238,7 +238,7 @@ int open_tmpfile(char *fnametmp, const char *fname, struct file_struct *file)
 }
 
 static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
-			const char *fname, int fd, struct file_struct *file, int inplace_sizing)
+			const char *fname, int fd, struct file_struct *file, int inplace_sizing, int ndx)
 {
 	static char file_sum1[MAX_DIGEST_LEN];
 	struct map_struct *mapbuf;
@@ -330,7 +330,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 
 			sum_update(data, i);
 
-			if (fd != -1 && write_file(fd, 0, offset, data, i) != i)
+			if (fd != -1 && write_file(fd, ndx, offset, data, i) != i)
 				goto report_write_error;
 			offset += i;
 			continue;
@@ -366,7 +366,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 				continue;
 			}
 		}
-		if (fd != -1 && map && write_file(fd, 0, offset, map, len) != (int)len)
+		if (fd != -1 && map && write_file(fd, ndx, offset, map, len) != (int)len)
 			goto report_write_error;
 		offset += len;
 	}
@@ -557,8 +557,11 @@ int recv_files(int f_in, int f_out, char *local_name)
 		cleanup_disable();
 
 		/* This call also sets cur_flist. */
-		ndx = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
-					 xname, &xlen);
+		ndx = read_int(f_in);
+		if (protocol_version >= 29) {
+			read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
+						 xname, &xlen);
+		}
 		if (ndx == NDX_DONE) {
 			if (!am_server && cur_flist) {
 				set_current_file_index(NULL, 0);

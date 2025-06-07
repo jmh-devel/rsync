@@ -203,6 +203,7 @@ static void write_ndx_and_attrs(int f_out, int ndx, int iflags,
 	write_ndx(f_out, ndx);
 	if (protocol_version < 29)
 		return;
+	write_int(f_out, ndx); // Add the file index to the data stream
 	write_shortint(f_out, iflags);
 	if (iflags & ITEM_BASIS_TYPE_FOLLOWS)
 		write_byte(f_out, fnamecmp_type);
@@ -217,21 +218,9 @@ static void write_ndx_and_attrs(int f_out, int ndx, int iflags,
 
 void send_files(int f_in, int f_out)
 {
-	int fd = -1;
-	struct sum_struct *s;
-	struct map_struct *mbuf = NULL;
-	STRUCT_STAT st;
-	char fname[MAXPATHLEN], xname[MAXPATHLEN];
-	const char *path, *slash;
-	uchar fnamecmp_type;
-	int iflags, xlen;
-	struct file_struct *file;
 	int phase = 0, max_phase = protocol_version >= 29 ? 2 : 1;
-	int itemizing = am_server ? logfile_format_has_i : stdout_format_has_i;
-	enum logcode log_code = log_before_transfer ? FLOG : FINFO;
-	int f_xfer = write_batch < 0 ? batch_fd : f_out;
 	int save_io_error = io_error;
-	int ndx, j;
+	int ndx;
 
 	if (DEBUG_GTE(SEND, 1))
 		rprintf(FINFO, "send_files starting\n");
@@ -247,7 +236,6 @@ void send_files(int f_in, int f_out)
 			extra_flist_sending_enabled = !flist_eof;
 		}
 
-		/* This call also sets cur_flist. */
 		ndx = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
 					 xname, &xlen);
 		extra_flist_sending_enabled = False;
@@ -276,197 +264,30 @@ void send_files(int f_in, int f_out)
 			continue;
 		}
 
-		if (inc_recurse)
-			send_extra_file_list(f_out, MIN_FILECNT_LOOKAHEAD);
-
-		if (ndx - cur_flist->ndx_start >= 0)
-			file = cur_flist->files[ndx - cur_flist->ndx_start];
-		else
-			file = dir_flist->files[cur_flist->parent_ndx];
-		if (F_PATHNAME(file)) {
-			path = F_PATHNAME(file);
-			slash = "/";
+		if (thread_pool) {
+			send_file_task_t *task = (send_file_task_t *)malloc(sizeof(send_file_task_t));
+			if (!task) {
+				out_of_memory("send_files task");
+			}
+			task->ndx = ndx;
+			task->iflags = iflags;
+			task->fname = strdup(fname);
+			task->file = file;
+			task->fnamecmp_type = fnamecmp_type;
+			task->xname = strdup(xname);
+			task->xlen = xlen;
+			task->f_in = f_in;
+			task->f_out = f_out;
+			threadpool_add(thread_pool, send_file_thread, task);
 		} else {
-			path = slash = "";
+			send_file_thread_body(ndx, iflags, fname, file, fnamecmp_type, xname, xlen, f_in, f_out);
 		}
-		if (!change_pathname(file, NULL, 0))
-			continue;
-		f_name(file, fname);
-
-		if (DEBUG_GTE(SEND, 1))
-			rprintf(FINFO, "send_files(%d, %s%s%s)\n", ndx, path,slash,fname);
-
-#ifdef SUPPORT_XATTRS
-		if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
-		 && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE)))
-			recv_xattr_request(file, f_in);
-#endif
-
-		if (!(iflags & ITEM_TRANSFER)) {
-			maybe_log_item(file, iflags, itemizing, xname);
-			write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
-			if (iflags & ITEM_IS_NEW) {
-				stats.created_files++;
-				if (S_ISREG(file->mode)) {
-					/* Nothing further to count. */
-				} else if (S_ISDIR(file->mode))
-					stats.created_dirs++;
-#ifdef SUPPORT_LINKS
-				else if (S_ISLNK(file->mode))
-					stats.created_symlinks++;
-#endif
-				else if (IS_DEVICE(file->mode))
-					stats.created_devices++;
-				else
-					stats.created_specials++;
-			}
-			continue;
-		}
-		if (phase == 2) {
-			rprintf(FERROR,
-				"got transfer request in phase 2 [%s]\n",
-				who_am_i());
-			exit_cleanup(RERR_PROTOCOL);
-		}
-
-		if (file->flags & FLAG_FILE_SENT) {
-			if (csum_length == SHORT_SUM_LENGTH) {
-				/* For inplace: redo phase turns off the backup
-				 * flag so that we do a regular inplace send. */
-				make_backups = -make_backups;
-				append_mode = -append_mode;
-				csum_length = SUM_LENGTH;
-			}
-		} else {
-			if (csum_length != SHORT_SUM_LENGTH) {
-				make_backups = -make_backups;
-				append_mode = -append_mode;
-				csum_length = SHORT_SUM_LENGTH;
-			}
-			if (iflags & ITEM_IS_NEW)
-				stats.created_files++;
-		}
-
-		updating_basis_file = (inplace_partial && fnamecmp_type == FNAMECMP_PARTIAL_DIR)
-		    || (inplace && (protocol_version >= 29 ? fnamecmp_type == FNAMECMP_FNAME : make_backups <= 0));
-
-		if (!am_server)
-			set_current_file_index(file, ndx);
-		stats.xferred_files++;
-		stats.total_transferred_size += F_LENGTH(file);
-
-		remember_initial_stats();
-
-		if (!do_xfers) { /* log the transfer */
-			log_item(FCLIENT, file, iflags, NULL);
-			write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
-			continue;
-		}
-
-		if (!(s = receive_sums(f_in))) {
-			io_error |= IOERR_GENERAL;
-			rprintf(FERROR_XFER, "receive_sums failed\n");
-			exit_cleanup(RERR_PROTOCOL);
-		}
-
-		fd = do_open_checklinks(fname);
-		if (fd == -1) {
-			if (errno == ENOENT) {
-				enum logcode c = am_daemon && protocol_version < 28 ? FERROR : FWARNING;
-				io_error |= IOERR_VANISHED;
-				rprintf(c, "file has vanished: %s\n",
-					full_fname(fname));
-			} else {
-				io_error |= IOERR_GENERAL;
-				rsyserr(FERROR_XFER, errno,
-					"send_files failed to open %s",
-					full_fname(fname));
-			}
-			free_sums(s);
-			if (protocol_version >= 30)
-				send_msg_int(MSG_NO_SEND, ndx);
-			continue;
-		}
-
-		/* map the local file */
-		if (do_fstat(fd, &st) != 0) {
-			io_error |= IOERR_GENERAL;
-			rsyserr(FERROR_XFER, errno, "fstat failed");
-			free_sums(s);
-			close(fd);
-			exit_cleanup(RERR_FILEIO);
-		}
-
-		if (IS_DEVICE(st.st_mode)) {
-			if (!copy_devices) {
-				rprintf(FERROR, "attempt to copy device contents without --copy-devices\n");
-				exit_cleanup(RERR_PROTOCOL);
-			}
-			if (st.st_size == 0)
-				st.st_size = get_device_size(fd, fname);
-		}
-
-		if (append_mode > 0 && st.st_size < F_LENGTH(file)) {
-			rprintf(FWARNING, "skipped diminished file: %s\n",
-				full_fname(fname));
-			free_sums(s);
-			close(fd);
-			if (protocol_version >= 30)
-				send_msg_int(MSG_NO_SEND, ndx);
-			continue;
-		}
-
-		if (st.st_size) {
-			int32 read_size = MAX(s->blength * 3, MAX_MAP_SIZE);
-			mbuf = map_file(fd, st.st_size, read_size, s->blength);
-		} else
-			mbuf = NULL;
-
-		if (DEBUG_GTE(DELTASUM, 2)) {
-			rprintf(FINFO, "send_files mapped %s%s%s of size %s\n",
-				path,slash,fname, big_num(st.st_size));
-		}
-
-		write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
-		write_sum_head(f_xfer, s);
-
-		if (DEBUG_GTE(DELTASUM, 2))
-			rprintf(FINFO, "calling match_sums %s%s%s\n", path,slash,fname);
-
-		if (log_before_transfer)
-			log_item(FCLIENT, file, iflags, NULL);
-		else if (!am_server && INFO_GTE(NAME, 1) && INFO_EQ(PROGRESS, 1))
-			rprintf(FCLIENT, "%s\n", fname);
-
-		set_compression(fname);
-
-		match_sums(f_xfer, s, mbuf, st.st_size);
-		if (INFO_GTE(PROGRESS, 1))
-			end_progress(st.st_size);
-		else if (want_progress_now)
-			instant_progress(fname);
-
-		log_item(log_code, file, iflags, NULL);
-
-		if (mbuf) {
-			j = unmap_file(mbuf);
-			if (j) {
-				io_error |= IOERR_GENERAL;
-				rsyserr(FERROR_XFER, j,
-					"read errors mapping %s",
-					full_fname(fname));
-			}
-		}
-		close(fd);
-
-		free_sums(s);
-
-		if (DEBUG_GTE(SEND, 1))
-			rprintf(FINFO, "sender finished %s%s%s\n", path,slash,fname);
-
-		/* Flag that we actually sent this entry. */
-		file->flags |= FLAG_FILE_SENT;
 	}
+
+	if (thread_pool) {
+		threadpool_destroy(thread_pool);
+	}
+
 	if (make_backups < 0)
 		make_backups = -make_backups;
 
@@ -479,4 +300,228 @@ void send_files(int f_in, int f_out)
 	match_report();
 
 	write_ndx(f_out, NDX_DONE);
+}
+
+void send_file_thread(void *arg) {
+    send_file_task_t *task = (send_file_task_t *)arg;
+    send_file_thread_body(task->ndx, task->iflags, task->fname, task->file, task->fnamecmp_type, task->xname, task->xlen, task->f_in, task->f_out);
+    free(task->fname);
+    free(task->xname);
+    free(task);
+}
+
+void send_file_thread_body(int ndx, int iflags, char *fname, struct file_struct *file, uchar fnamecmp_type, char *xname, int xlen, int f_in, int f_out)
+{
+	int fd = -1;
+	struct sum_struct *s;
+	struct map_struct *mbuf = NULL;
+	STRUCT_STAT st;
+	const char *path, *slash;
+	int itemizing = am_server ? logfile_format_has_i : stdout_format_has_i;
+	enum logcode log_code = log_before_transfer ? FLOG : FINFO;
+	int f_xfer = write_batch < 0 ? batch_fd : f_out;
+	int j;
+
+	if (inc_recurse)
+		send_extra_file_list(f_out, MIN_FILECNT_LOOKAHEAD);
+
+	if (ndx - cur_flist->ndx_start >= 0)
+		file = cur_flist->files[ndx - cur_flist->ndx_start];
+	else
+		file = dir_flist->files[cur_flist->parent_ndx];
+	if (F_PATHNAME(file)) {
+		path = F_PATHNAME(file);
+		slash = "/";
+	} else {
+		path = slash = "";
+	}
+	if (!change_pathname(file, NULL, 0))
+		return;
+	f_name(file, fname);
+
+	if (DEBUG_GTE(SEND, 1))
+		rprintf(FINFO, "send_files(%d, %s%s%s)\n", ndx, path,slash,fname);
+
+#ifdef SUPPORT_XATTRS
+	if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
+	 && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE)))
+		recv_xattr_request(file, f_in);
+#endif
+
+	if (!(iflags & ITEM_TRANSFER)) {
+		maybe_log_item(file, iflags, itemizing, xname);
+		pthread_mutex_lock(&socket_mutex);
+		write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
+		pthread_mutex_unlock(&socket_mutex);
+		if (iflags & ITEM_IS_NEW) {
+			stats.created_files++;
+			if (S_ISREG(file->mode)) {
+				/* Nothing further to count. */
+			} else if (S_ISDIR(file->mode))
+				stats.created_dirs++;
+#ifdef SUPPORT_LINKS
+			else if (S_ISLNK(file->mode))
+				stats.created_symlinks++;
+#endif
+			else if (IS_DEVICE(file->mode))
+				stats.created_devices++;
+			else
+				stats.created_specials++;
+		}
+		return;
+	}
+
+	if (file->flags & FLAG_FILE_SENT) {
+		if (csum_length == SHORT_SUM_LENGTH) {
+			/* For inplace: redo phase turns off the backup
+			 * flag so that we do a regular inplace send. */
+			make_backups = -make_backups;
+			append_mode = -append_mode;
+			csum_length = SUM_LENGTH;
+		}
+	} else {
+		if (csum_length != SHORT_SUM_LENGTH) {
+			make_backups = -make_backups;
+			append_mode = -append_mode;
+			csum_length = SHORT_SUM_LENGTH;
+		}
+		if (iflags & ITEM_IS_NEW)
+			stats.created_files++;
+	}
+
+	updating_basis_file = (inplace_partial && fnamecmp_type == FNAMECMP_PARTIAL_DIR)
+		|| (inplace && (protocol_version >= 29 ? fnamecmp_type == FNAMECMP_FNAME : make_backups <= 0));
+
+	if (!am_server)
+		set_current_file_index(file, ndx);
+	stats.xferred_files++;
+	stats.total_transferred_size += F_LENGTH(file);
+
+	remember_initial_stats();
+
+	if (!do_xfers) { /* log the transfer */
+		log_item(FCLIENT, file, iflags, NULL);
+		pthread_mutex_lock(&socket_mutex);
+		write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
+		pthread_mutex_unlock(&socket_mutex);
+		return;
+	}
+
+	pthread_mutex_lock(&socket_mutex);
+	if (!(s = receive_sums(f_in))) {
+		pthread_mutex_unlock(&socket_mutex);
+		io_error |= IOERR_GENERAL;
+		rprintf(FERROR_XFER, "receive_sums failed\n");
+		exit_cleanup(RERR_PROTOCOL);
+	}
+	pthread_mutex_unlock(&socket_mutex);
+
+	fd = do_open_checklinks(fname);
+	if (fd == -1) {
+		if (errno == ENOENT) {
+			enum logcode c = am_daemon && protocol_version < 28 ? FERROR : FWARNING;
+			io_error |= IOERR_VANISHED;
+			rprintf(c, "file has vanished: %s\n",
+				full_fname(fname));
+		} else {
+			io_error |= IOERR_GENERAL;
+			rsyserr(FERROR_XFER, errno,
+				"send_files failed to open %s",
+				full_fname(fname));
+		}
+		free_sums(s);
+		if (protocol_version >= 30) {
+			pthread_mutex_lock(&socket_mutex);
+			send_msg_int(MSG_NO_SEND, ndx);
+			pthread_mutex_unlock(&socket_mutex);
+		}
+		return;
+	}
+
+	/* map the local file */
+	if (do_fstat(fd, &st) != 0) {
+		io_error |= IOERR_GENERAL;
+		rsyserr(FERROR_XFER, errno, "fstat failed");
+		free_sums(s);
+		close(fd);
+		exit_cleanup(RERR_FILEIO);
+	}
+
+	if (IS_DEVICE(st.st_mode)) {
+		if (!copy_devices) {
+			rprintf(FERROR, "attempt to copy device contents without --copy-devices\n");
+			exit_cleanup(RERR_PROTOCOL);
+		}
+		if (st.st_size == 0)
+			st.st_size = get_device_size(fd, fname);
+	}
+
+	if (append_mode > 0 && st.st_size < F_LENGTH(file)) {
+		rprintf(FWARNING, "skipped diminished file: %s\n",
+			full_fname(fname));
+		free_sums(s);
+		close(fd);
+		if (protocol_version >= 30) {
+			pthread_mutex_lock(&socket_mutex);
+			send_msg_int(MSG_NO_SEND, ndx);
+			pthread_mutex_unlock(&socket_mutex);
+		}
+		return;
+	}
+
+	if (st.st_size) {
+		int32 read_size = MAX(s->blength * 3, MAX_MAP_SIZE);
+		mbuf = map_file(fd, st.st_size, read_size, s->blength);
+	} else
+		mbuf = NULL;
+
+	if (DEBUG_GTE(DELTASUM, 2)) {
+		rprintf(FINFO, "send_files mapped %s%s%s of size %s\n",
+			path,slash,fname, big_num(st.st_size));
+	}
+
+	pthread_mutex_lock(&socket_mutex);
+	write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xlen);
+	write_sum_head(f_xfer, s);
+	pthread_mutex_unlock(&socket_mutex);
+
+	if (DEBUG_GTE(DELTASUM, 2))
+		rprintf(FINFO, "calling match_sums %s%s%s\n", path,slash,fname);
+
+	if (log_before_transfer)
+		log_item(FCLIENT, file, iflags, NULL);
+	else if (!am_server && INFO_GTE(NAME, 1) && INFO_EQ(PROGRESS, 1))
+		rprintf(FCLIENT, "%s\n", fname);
+
+	set_compression(fname);
+
+	pthread_mutex_lock(&socket_mutex);
+	match_sums(f_xfer, s, mbuf, st.st_size);
+	pthread_mutex_unlock(&socket_mutex);
+
+	if (INFO_GTE(PROGRESS, 1))
+		end_progress(st.st_size);
+	else if (want_progress_now)
+		instant_progress(fname);
+
+	log_item(log_code, file, iflags, NULL);
+
+	if (mbuf) {
+		j = unmap_file(mbuf);
+		if (j) {
+			io_error |= IOERR_GENERAL;
+			rsyserr(FERROR_XFER, j,
+				"read errors mapping %s",
+				full_fname(fname));
+		}
+	}
+	close(fd);
+
+	free_sums(s);
+
+	if (DEBUG_GTE(SEND, 1))
+		rprintf(FINFO, "sender finished %s%s%s\n", path,slash,fname);
+
+	/* Flag that we actually sent this entry. */
+	file->flags |= FLAG_FILE_SENT;
 }

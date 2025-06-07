@@ -150,6 +150,14 @@ int write_file(int f, int use_seek, OFF_T offset, const char *buf, int len)
 {
 	int ret = 0;
 
+	if (thread_pool) {
+		if (pwrite(f, buf, len, offset) < len) {
+			rsyserr(FERROR_XFER, errno, "pwrite failed on file");
+			return -1;
+		}
+		return len;
+	}
+
 	while (len > 0) {
 		int r1;
 		if (sparse_files > 0) {

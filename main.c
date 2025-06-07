@@ -1842,11 +1842,16 @@ int main(int argc,char *argv[])
 			exit_cleanup(RERR_MALLOC);
 		}
 	} else if (num_threads == 0 && (poptGetNextOpt(pc) == 'j')) {
+		// Start the network monitor for auto-detection
+		start_network_monitor();
 		num_threads = get_optimal_threads();
 		thread_pool = threadpool_create(num_threads, 256);
 		if (thread_pool == NULL) {
 			rprintf(FERROR, "Failed to create thread pool\n");
 			exit_cleanup(RERR_MALLOC);
+		}
+		if (INFO_GTE(PROGRESS, 1)) {
+			rprintf(FINFO, "Auto-detected optimal thread count: %d\n", num_threads);
 		}
 	}
 	

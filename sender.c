@@ -321,6 +321,9 @@ void send_file_thread_body(int ndx, int iflags, char *fname, struct file_struct 
 	enum logcode log_code = log_before_transfer ? FLOG : FINFO;
 	int f_xfer = write_batch < 0 ? batch_fd : f_out;
 	int j;
+	struct timeval start_time, end_time;
+	
+	gettimeofday(&start_time, NULL);
 
 	if (inc_recurse)
 		send_extra_file_list(f_out, MIN_FILECNT_LOOKAHEAD);
@@ -498,6 +501,13 @@ void send_file_thread_body(int ndx, int iflags, char *fname, struct file_struct 
 	pthread_mutex_lock(&socket_mutex);
 	match_sums(f_xfer, s, mbuf, st.st_size);
 	pthread_mutex_unlock(&socket_mutex);
+
+	gettimeofday(&end_time, NULL);
+	double time_taken = (end_time.tv_sec - start_time.tv_sec) + 
+	                    (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
+	
+	// Update network statistics with transfer information
+	update_transfer_stats(st.st_size, time_taken);
 
 	if (INFO_GTE(PROGRESS, 1))
 		end_progress(st.st_size);

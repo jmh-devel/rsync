@@ -140,6 +140,7 @@ time_t stop_at_utime = 0;
 char *skip_compress = NULL;
 char *copy_as = NULL;
 item_list dparam_list = EMPTY_ITEM_LIST;
+int num_threads = 0;
 
 /** Network address family. **/
 int default_af_hint
@@ -775,6 +776,7 @@ static struct poptOption long_options[] = {
   {"no-itemize-changes",0, POPT_ARG_VAL,    &itemize_changes, 0, 0, 0 },
   {"no-i",             0,  POPT_ARG_VAL,    &itemize_changes, 0, 0, 0 },
   {"bwlimit",          0,  POPT_ARG_STRING, &bwlimit_arg, OPT_BWLIMIT, 0, 0 },
+  {"parallel",        'j', POPT_ARG_INT,    &num_threads, 0, "set number of parallel threads", "NUM" },
   {"no-bwlimit",       0,  POPT_ARG_VAL,    &bwlimit, 0, 0, 0 },
   {"backup",          'b', POPT_ARG_VAL,    &make_backups, 1, 0, 0 },
   {"no-backup",        0,  POPT_ARG_VAL,    &make_backups, 0, 0, 0 },

@@ -21,6 +21,25 @@
 
 #include "rsync.h"
 #include "inums.h"
+#include "threadpool.h"
+#include <pthread.h>
+
+extern threadpool_t *thread_pool;
+pthread_mutex_t socket_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    int ndx;
+    int iflags;
+    char *fname;
+    struct file_struct *file;
+    uchar fnamecmp_type;
+    char *xname;
+    int xlen;
+    int f_in;
+    int f_out;
+} send_file_task_t;
+
+void send_file_thread(void *arg);
 
 extern int do_xfers;
 extern int am_server;

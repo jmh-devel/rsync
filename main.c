@@ -24,6 +24,7 @@
 #include "inums.h"
 #include "ifuncs.h"
 #include "io.h"
+#include "threadpool.h"
 #if defined CONFIG_LOCALE && defined HAVE_LOCALE_H
 #include <locale.h>
 #endif
@@ -119,6 +120,7 @@ int batch_gen_fd = -1;
 int sender_keeps_checksum = 0;
 int raw_argc, cooked_argc;
 char **raw_argv, **cooked_argv;
+threadpool_t *thread_pool = NULL;
 
 /* There's probably never more than at most 2 outstanding child processes,
  * but set it higher, just in case. */
@@ -1832,6 +1834,14 @@ int main(int argc,char *argv[])
 		}
 	}
 
+	if (num_threads > 0) {
+		thread_pool = threadpool_create(num_threads, 256);
+		if (thread_pool == NULL) {
+			rprintf(FERROR, "Failed to create thread pool\n");
+			exit_cleanup(RERR_MALLOC);
+		}
+	}
+	
 	if (argc < 1) {
 		usage(FERROR);
 		exit_cleanup(RERR_SYNTAX);
